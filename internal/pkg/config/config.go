@@ -6,8 +6,14 @@ import (
 )
 
 type Config struct {
-	Database DatabaseConfig `mapstructure:"database"`
-	Logger   LogConfig      `mapstructure:"logger"`
+	Database  DatabaseConfig  `mapstructure:"database"`
+	Logger    LogConfig       `mapstructure:"logger"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Algorithm AlgorithmConfig `mapstructure:"algorithm"`
+}
+
+type ServerConfig struct {
+	Port string `mapstructure:"port"`
 }
 
 type DatabaseConfig struct {
@@ -27,6 +33,12 @@ type LogConfig struct {
 	MaxBackups int    // 最大备份数量
 	MaxAge     int    // 最大保留天数
 	Compress   bool   // 是否压缩
+}
+
+// AlgorithmConfig 存放算法相关参数
+type AlgorithmConfig struct {
+	ImdbM float64 `mapstructure:"imdb_m"`
+	ImdbC float64 `mapstructure:"imdb_c"`
 }
 
 // 全局配置变量

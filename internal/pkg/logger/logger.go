@@ -20,8 +20,7 @@ var (
 type ctxKeyLogger struct{}
 
 // InitLogger 初始化日志系统，支持 console / file，支持动态日志等级
-func InitLogger(cfg *config.Config) error {
-	logCfg := cfg.Logger
+func InitLogger(logCfg *config.LogConfig) error {
 
 	// 设置日志等级
 	atomicLevel = zap.NewAtomicLevel()

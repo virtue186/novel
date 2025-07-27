@@ -1,8 +1,12 @@
+# 端口设置
+server:
+  port: 8000
+
 # 数据库配置
 database:
   host: "localhost"
   port: 5432
-  user: ""       # 用户名
+  user: "novel"       # 用户名
   password: "123.com" # 密码
   dbname: "novel_db"     # 数据库名称
   sslmode: "disable"    # 暂时在自己的开发环境禁用SSL
@@ -17,4 +21,7 @@ logger:
   maxAge: 7                    # 最大保留天数 (days)
   compress: false                # 是否压缩
 
-
+# 评分算法参数
+algorithm:
+  imdb_m: 100.0 # 入榜最低影响力阈值 (使用浮点数)
+  imdb_c: 7.5   # 全站基准分

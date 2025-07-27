@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"github.com/novel/internal/model"
 	"github.com/novel/internal/pkg/config"
 	"github.com/novel/internal/pkg/logger"
 	"gorm.io/driver/postgres"
@@ -26,7 +27,7 @@ func InitDB(cfg *config.DatabaseConfig) (*gorm.DB, error) {
 	}
 	logger.InfoRaw("Database connection initialized")
 
-	err = db.AutoMigrate()
+	err = db.AutoMigrate(&model.Novel{}, &model.Rating{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to migrate projects: %w", err)
 	}
