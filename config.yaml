@@ -1,0 +1,20 @@
+# 数据库配置
+database:
+  host: "localhost"
+  port: 5432
+  user: ""       # 用户名
+  password: "123.com" # 密码
+  dbname: "novel_db"     # 数据库名称
+  sslmode: "disable"    # 暂时在自己的开发环境禁用SSL
+
+# 日志配置
+logger:
+  mode: "dev"                 # "dev" or "prod"
+  level: "info"                # "debug", "info", "warn", "error"
+  filePath: "logs/app.dev.log" # 日志文件路径
+  maxSize: 10                  # 单个文件最大尺寸 (MB)
+  maxBackups: 5                  # 最大备份数量
+  maxAge: 7                    # 最大保留天数 (days)
+  compress: false                # 是否压缩
+
+
