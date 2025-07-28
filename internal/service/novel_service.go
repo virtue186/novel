@@ -6,145 +6,221 @@ import (
 	"github.com/novel/internal/model"
 	"github.com/novel/internal/pkg/config"
 	"github.com/novel/internal/repository"
+	"gorm.io/gorm"
 	"log"
+	"math"
 )
 
 // NovelService 定义了与小说相关的业务逻辑接口
 type NovelService interface {
-	GetNovelWithCalculatedScores(id uint) (*NovelScoreDetails, error)
-	CreateRatingForNovel(novelID uint, score int) (*model.Rating, error)
 	GetRankedNovels(query *dto.PaginationQuery) (*dto.PaginatedResponse, error)
-}
-
-// novelService 结构体实现了 NovelService 接口
-type novelService struct {
-	repo repository.NovelRepository
-	m    float64 // IMDb 公式参数 m
-	c    float64 // IMDb 公式参数 c
+	GetNovelWithCalculatedScores(id uint) (*NovelScoreDetails, error)
+	CreateRatingForNovel(userID, novelID uint, score int, comment string) (*model.Rating, error)
+	VoteForRating(userID, ratingID uint, voteType model.VoteType) error
 }
 
 // NovelScoreDetails 是一个新的 DTO，用于封装小说及其各种计算分数
 type NovelScoreDetails struct {
-	Novel          *model.Novel
-	RatingsCount   int
-	SimpleAvgScore float64
-	WeightedScore  float64 // 我们最终的目标
+	Novel         *model.Novel `json:"novel"`
+	RatingsCount  int          `json:"ratings_count"`
+	WeightedScore float64      `json:"weighted_score"`
 }
 
-// NewNovelService 是 novelService 的构造函数
-func NewNovelService(repo repository.NovelRepository, cfg *config.AlgorithmConfig) NovelService {
-	return &novelService{
-		repo: repo,
-		m:    cfg.ImdbM,
-		c:    cfg.ImdbC,
-	}
+// novelService 结构体实现了 NovelService 接口
+type novelService struct {
+	repo     repository.NovelRepository
+	trustSvc TrustService
+	m        float64 // IMDb 公式参数 m
+	c        float64 // IMDb 公式参数 c
 }
 
-// GetNovelWithCalculatedScores 现在直接从数据库读取预计算的分数
-func (s *novelService) GetNovelWithCalculatedScores(id uint) (*NovelScoreDetails, error) {
-	novel, err := s.repo.FindByID(id) // 不再需要预加载 Ratings
-	if err != nil {
-		return nil, err
-	}
-
-	// 将数据库中的数据填充到 DTO 中
-	details := &NovelScoreDetails{
-		// 注意：这里的 Novel 对象不包含详细的 Ratings 列表，这会使API响应更轻快
-		// 如果需要，可以另开一个API来获取评论列表
-		Novel:          novel,
-		RatingsCount:   novel.RatingsCount,
-		SimpleAvgScore: 0, // 简单平均分可以考虑不再计算和返回，或按需计算
-		WeightedScore:  novel.WeightedScore,
-	}
-
-	return details, nil
-}
-
-// CreateRatingForNovel 在创建评分后，异步触发分数更新
-func (s *novelService) CreateRatingForNovel(novelID uint, score int) (*model.Rating, error) {
-	// ... (业务校验和创建 rating 的逻辑保持不变) ...
-	_, err := s.repo.FindByID(novelID)
-	if err != nil {
-		return nil, err
-	}
-
-	rating := &model.Rating{
-		NovelID: novelID,
-		Score:   score,
-	}
-
-	if err := s.repo.CreateRating(rating); err != nil {
-		return nil, errors.New("failed to create rating in repository")
-	}
-
-	// 异步触发分数重新计算，不会阻塞当前请求
-	go s.recalculateAndUpdateNovelScores(novelID)
-
-	return rating, nil
-}
-
-// recalculateAndUpdateNovelScores 是核心的私有方法
-func (s *novelService) recalculateAndUpdateNovelScores(novelID uint) {
-	// 在一个新的 goroutine 中，我们最好用 recover 来防止 panic 导致整个程序崩溃
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Recovered in recalculateAndUpdateNovelScores: %v", r)
-		}
-	}()
-
-	novel, err := s.repo.FindByIDWithRatings(novelID)
-	if err != nil {
-		log.Printf("Error finding novel %d for recalculation: %v", novelID, err)
-		return
-	}
-
-	// --- 这里是我们的核心算法逻辑 ---
-	var totalScore int
-	for _, rating := range novel.Ratings {
-		totalScore += rating.Score
-	}
-	ratingsCount := len(novel.Ratings)
-	var simpleAvgScore float64
-	if ratingsCount > 0 {
-		simpleAvgScore = float64(totalScore) / float64(ratingsCount)
-	}
-	v := float64(ratingsCount)
-	R := simpleAvgScore
-	m := s.m
-	c := s.c
-	weightedScore := (v/(v+m))*R + (m/(v+m))*c
-	// --- 算法逻辑结束 ---
-
-	// 更新 novel 对象中的预计算字段
-	novel.WeightedScore = weightedScore
-	novel.RatingsCount = ratingsCount
-
-	// 通过 Repository 将更新持久化到数据库
-	if err := s.repo.Update(novel); err != nil {
-		log.Printf("Error updating novel %d scores: %v", novelID, err)
-	}
-
-	log.Printf("Successfully recalculated scores for novel %d. New score: %.2f", novelID, weightedScore)
+// NewNovelService 是 novelService 的构造函数，负责所有依赖的注入
+func NewNovelService(repo repository.NovelRepository, trustSvc TrustService, cfg *config.AlgorithmConfig) NovelService {
+	return &novelService{repo: repo, trustSvc: trustSvc, m: cfg.ImdbM, c: cfg.ImdbC}
 }
 
 // GetRankedNovels 实现了获取排序和分页后的小说列表的业务逻辑
 func (s *novelService) GetRankedNovels(query *dto.PaginationQuery) (*dto.PaginatedResponse, error) {
-	// 可以在这里增加业务逻辑，例如，限制 PageSize 的最大值
-	if query.PageSize > 100 {
+	if query.PageSize > 100 { // 设置每页大小的上限，防止恶意请求
 		query.PageSize = 100
 	}
-
-	// 调用 Repository 获取数据
 	novels, total, err := s.repo.FindAll(query)
 	if err != nil {
 		return nil, err
 	}
-
-	// 封装成标准的分页响应 DTO
 	return &dto.PaginatedResponse{
 		Total:    total,
 		Page:     query.Page,
 		PageSize: query.PageSize,
 		Data:     novels,
 	}, nil
+}
+
+// GetNovelWithCalculatedScores 直接从数据库读取预计算的分数，实现高性能读取
+func (s *novelService) GetNovelWithCalculatedScores(id uint) (*NovelScoreDetails, error) {
+	novel, err := s.repo.FindByID(id)
+	if err != nil {
+		return nil, err
+	}
+	return &NovelScoreDetails{
+		Novel:         novel,
+		RatingsCount:  novel.RatingsCount,
+		WeightedScore: novel.WeightedScore,
+	}, nil
+}
+
+// CreateRatingForNovel 封装了创建评分的业务逻辑
+func (s *novelService) CreateRatingForNovel(userID, novelID uint, score int, comment string) (*model.Rating, error) {
+	_, err := s.repo.FindByID(novelID)
+	if err != nil {
+		return nil, err
+	}
+	// [TODO] 在这里可以增加业务规则，例如：一个用户对一本书只能评分一次
+	rating := &model.Rating{
+		UserID:  userID,
+		NovelID: novelID,
+		Score:   score,
+		Comment: comment,
+	}
+	if err := s.repo.CreateRating(rating); err != nil {
+		return nil, errors.New("failed to create rating in repository")
+	}
+	go s.triggerCalculationsOnNewRating(rating)
+	return rating, nil
+}
+
+// VoteForRating 实现了完整的投票业务逻辑
+func (s *novelService) VoteForRating(userID, ratingID uint, voteType model.VoteType) error {
+	rating, err := s.repo.FindRatingByID(ratingID)
+	if err != nil {
+		return err
+	}
+	oldVote, err := s.repo.FindUserVote(userID, ratingID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return errors.New("failed to check existing vote")
+	}
+
+	var newVote *model.RatingVote
+	isCancelVote := false
+	var voteChange int
+
+	if errors.Is(err, gorm.ErrRecordNotFound) { // 首次投票
+		newVote = &model.RatingVote{UserID: userID, RatingID: ratingID, Vote: voteType}
+		voteChange = int(voteType) // 赞同为+1，反对为-1
+		if voteType == model.VoteTypeUp {
+			rating.UpvotesCount++
+		} else {
+			rating.DownvotesCount++
+		}
+	} else { // 已投过票
+		if oldVote.Vote == voteType { // 取消投票
+			isCancelVote = true
+			voteChange = -int(voteType) // 取消赞同为-1，取消反对为+1
+			if oldVote.Vote == model.VoteTypeUp {
+				rating.UpvotesCount--
+			} else {
+				rating.DownvotesCount--
+			}
+		} else { // 改票
+			newVote = &model.RatingVote{UserID: userID, RatingID: ratingID, Vote: voteType}
+			voteChange = 2 * int(voteType) // 赞->踩为-2, 踩->赞为+2
+			if voteType == model.VoteTypeUp {
+				rating.UpvotesCount++
+				rating.DownvotesCount--
+			} else {
+				rating.DownvotesCount++
+				rating.UpvotesCount--
+			}
+		}
+	}
+	if isCancelVote {
+		err = s.repo.UpdateRatingVote(rating, oldVote, nil)
+	} else {
+		err = s.repo.UpdateRatingVote(rating, oldVote, newVote)
+	}
+	if err != nil {
+		return errors.New("failed to update vote")
+	}
+	go s.triggerCalculationsOnVote(userID, rating, voteChange)
+	return nil
+}
+
+// --- 后台异步计算任务 ---
+
+func (s *novelService) triggerCalculationsOnNewRating(rating *model.Rating) {
+	initialWeight := s.calculateAndSaveSingleRatingWeight(rating)
+	s.trustSvc.UpdateTrustScoreOnNewRating(rating.UserID, initialWeight)
+	s.recalculateAndUpdateNovelScores(rating.NovelID)
+}
+
+func (s *novelService) triggerCalculationsOnVote(voterID uint, rating *model.Rating, voteChange int) {
+	s.calculateAndSaveSingleRatingWeight(rating)
+	s.trustSvc.UpdateTrustScoreOnVote(voterID, rating.UserID, voteChange)
+	s.recalculateAndUpdateNovelScores(rating.NovelID)
+}
+
+// --- 核心算法与辅助函数 ---
+
+func (s *novelService) calculateAndSaveSingleRatingWeight(rating *model.Rating) float64 {
+	wAction := s.calculateActionWeight(rating)
+	wQuality := s.calculateQualityWeight(rating)
+	wUser, _ := s.trustSvc.GetUserTrustScore(rating.UserID) // 在后台任务中，我们可以忽略错误，使用默认值
+	wCommunity := s.calculateCommunityWeight(rating)
+
+	finalWeight := wAction * wQuality * wUser * wCommunity
+	rating.Weight = finalWeight
+	if err := s.repo.UpdateRating(rating); err != nil {
+		log.Printf("Failed to update rating weight for rating %d: %v", rating.ID, err)
+	}
+	return finalWeight
+}
+
+func (s *novelService) recalculateAndUpdateNovelScores(novelID uint) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("FATAL: Recovered in recalculateAndUpdateNovelScores for novelID %d. Panic: %v", novelID, r)
+		}
+	}()
+	novel, err := s.repo.FindByIDWithRatings(novelID)
+	if err != nil {
+		log.Printf("ERROR: Failed to find novel %d for score recalculation: %v", novelID, err)
+		return
+	}
+	var totalWeightedScore, totalWeight float64
+	for _, rating := range novel.Ratings {
+		totalWeightedScore += float64(rating.Score) * rating.Weight
+		totalWeight += rating.Weight
+	}
+	var weightedAvgScore float64
+	if totalWeight > 0 {
+		weightedAvgScore = totalWeightedScore / totalWeight
+	}
+	v_w, R_w, m, c := totalWeight, weightedAvgScore, s.m, s.c
+	finalWeightedScore := (v_w/(v_w+m))*R_w + (m/(v_w+m))*c
+	novel.WeightedScore = finalWeightedScore
+	novel.RatingsCount = len(novel.Ratings)
+	if err := s.repo.Update(novel); err != nil {
+		log.Printf("ERROR: Failed to update scores for novel %d: %v", novelID, err)
+	}
+	log.Printf("INFO: Successfully recalculated scores for novel %d. New WeightedScore: %.2f, RatingsCount: %d", novelID, finalWeightedScore, novel.RatingsCount)
+}
+
+func (s *novelService) calculateActionWeight(rating *model.Rating) float64 {
+	if rating.Comment != "" {
+		return 1.0
+	}
+	return 0.5
+}
+
+func (s *novelService) calculateQualityWeight(rating *model.Rating) float64 {
+	// TODO 未来考虑集成AI进行评论质量的权重计算
+	return 1.0
+}
+
+func (s *novelService) calculateCommunityWeight(rating *model.Rating) float64 {
+	netUpvotes := rating.UpvotesCount - rating.DownvotesCount
+	if netUpvotes < 0 {
+		netUpvotes = 0
+	}
+	return 1 + 0.5*math.Log10(float64(netUpvotes)+1)
 }

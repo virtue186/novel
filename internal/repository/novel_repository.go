@@ -14,6 +14,10 @@ type NovelRepository interface {
 	CreateRating(rating *model.Rating) error
 	FindByIDWithRatings(id uint) (*model.Novel, error)
 	Update(novel *model.Novel) error
+	FindRatingByID(id uint) (*model.Rating, error)
+	FindUserVote(userID, ratingID uint) (*model.RatingVote, error)
+	UpdateRatingVote(rating *model.Rating, oldVote, newVote *model.RatingVote) error
+	UpdateRating(rating *model.Rating) error
 }
 
 // novelRepository 结构体实现了 NovelRepository 接口
@@ -56,7 +60,6 @@ func (r *novelRepository) FindAll(query *dto.PaginationQuery) ([]model.Novel, in
 func (r *novelRepository) FindByID(id uint) (*model.Novel, error) {
 	var novel model.Novel
 	err := r.db.First(&novel, id).Error
-	// 注意：这里我们直接返回 gorm 的错误，让上层去判断是不是 ErrRecordNotFound
 	return &novel, err
 }
 
@@ -77,4 +80,48 @@ func (r *novelRepository) FindByIDWithRatings(id uint) (*model.Novel, error) {
 func (r *novelRepository) Update(novel *model.Novel) error {
 	// GORM 的 Save 会更新所有字段，即使是零值
 	return r.db.Save(novel).Error
+}
+
+// FindRatingByID 根据ID查找评分
+func (r *novelRepository) FindRatingByID(id uint) (*model.Rating, error) {
+	var rating model.Rating
+	err := r.db.First(&rating, id).Error
+	return &rating, err
+}
+
+// FindUserVote 查找特定用户对特定评分的投票记录
+func (r *novelRepository) FindUserVote(userID, ratingID uint) (*model.RatingVote, error) {
+	var vote model.RatingVote
+	err := r.db.Where("user_id = ? AND rating_id = ?", userID, ratingID).First(&vote).Error
+	return &vote, err
+}
+
+// UpdateRatingVote 使用数据库事务来更新投票
+func (r *novelRepository) UpdateRatingVote(rating *model.Rating, oldVote, newVote *model.RatingVote) error {
+	// 使用事务来保证数据一致性：对 vote 表的修改和对 rating 表计数的修改，必须同时成功或失败
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		// --- 处理 vote 表 ---
+		if oldVote != nil { // 如果存在旧投票，先删除
+			if err := tx.Delete(oldVote).Error; err != nil {
+				return err
+			}
+		}
+		if newVote != nil { // 如果存在新投票，创建它
+			if err := tx.Create(newVote).Error; err != nil {
+				return err
+			}
+		}
+
+		// --- 更新 rating 表的计数 ---
+		if err := tx.Save(rating).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+func (r *novelRepository) UpdateRating(rating *model.Rating) error {
+	// GORM 的 Save 会根据主键(ID)来执行更新，更新所有字段
+	return r.db.Save(rating).Error
 }

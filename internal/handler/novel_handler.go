@@ -4,6 +4,8 @@ import (
 	"errors"
 	"github.com/gin-gonic/gin"
 	"github.com/novel/internal/dto"
+	"github.com/novel/internal/middleware"
+	"github.com/novel/internal/model"
 	"github.com/novel/internal/pkg/response"
 	"github.com/novel/internal/service"
 	"gorm.io/gorm"
@@ -20,27 +22,24 @@ func NewNovelHandler(svc service.NovelService) *NovelHandler {
 	return &NovelHandler{svc: svc}
 }
 
-// GetNovels 获取小说列表 (我们将在下一步增强此方法)
+// GetNovels 获取小说列表 (已为排序和分页做好准备)
 func (h *NovelHandler) GetNovels(c *gin.Context) {
-	// 1. 将 URL query 参数绑定到我们的 DTO 结构体上
 	var query dto.PaginationQuery
 	if err := c.ShouldBindQuery(&query); err != nil {
-		response.BadRequest(c, err.Error())
+		response.BadRequest(c, "分页或排序参数错误")
 		return
 	}
 
-	// 2. 调用 Service 获取分页结果
 	paginatedResult, err := h.svc.GetRankedNovels(&query)
 	if err != nil {
 		response.ServerError(c)
 		return
 	}
 
-	// 3. 返回标准化的分页响应
 	response.Ok(c, paginatedResult)
 }
 
-// GetNovelByID 获取单本小说的详情
+// GetNovelByID 获取单本小说的详情 (已为高性能预计算做好准备)
 func (h *NovelHandler) GetNovelByID(c *gin.Context) {
 	novelID, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
@@ -56,29 +55,40 @@ func (h *NovelHandler) GetNovelByID(c *gin.Context) {
 		}
 		return
 	}
-
-	// 2. 直接将 Service 返回的 DTO 作为响应数据
-	//    Handler 不再需要关心数据是如何组装的
 	response.Ok(c, details)
 }
 
-// CreateRating 为小说创建新评分 (保持不变，已经很完美)
+// CreateRating 为小说创建新评分 (已完善)
 func (h *NovelHandler) CreateRating(c *gin.Context) {
+	// 1. 解析小说ID，确保类型正确
 	novelID, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
 		response.BadRequest(c, "无效的小说ID")
 		return
 	}
 
-	var input struct {
-		Score int `json:"score" binding:"required,min=1,max=10"`
+	// 2. 从 Context 中获取当前登录用户的ID
+	userIDVal, exists := c.Get(middleware.CtxUserIDKey)
+	if !exists {
+		response.Fail(c, "无法获取用户信息，请重新登录")
+		return
 	}
-	if err := c.ShouldBindJSON(&input); err != nil {
-		response.BadRequest(c, err.Error())
+	// 进行类型断言，确保 userID 是 uint 类型
+	userID, ok := userIDVal.(uint)
+	if !ok {
+		response.ServerError(c) // 如果类型不匹配，说明中间件或代码逻辑有问题
 		return
 	}
 
-	rating, err := h.svc.CreateRatingForNovel(uint(novelID), input.Score)
+	// 3. 绑定请求体到专用的DTO
+	var req dto.CreateRatingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "请求参数不合法")
+		return
+	}
+
+	// 4. 调用 Service 处理业务，现在参数完全匹配
+	rating, err := h.svc.CreateRatingForNovel(userID, uint(novelID), req.Score, req.Comment)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			response.NotFound(c)
@@ -89,4 +99,41 @@ func (h *NovelHandler) CreateRating(c *gin.Context) {
 	}
 
 	response.OkWithMessage(c, "评分成功", rating)
+}
+
+// VoteForRating 为评分投票 (已完善)
+func (h *NovelHandler) VoteForRating(c *gin.Context) {
+	// 1. 解析评分ID
+	ratingID, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		response.BadRequest(c, "无效的评分ID")
+		return
+	}
+
+	// 2. 从 Context 中获取当前登录用户的ID
+	userID, exists := c.Get(middleware.CtxUserIDKey)
+	if !exists {
+		response.Fail(c, "无法获取用户信息，请重新登录")
+		return
+	}
+
+	// 3. 绑定请求体到专用的DTO
+	var req dto.VoteForRatingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "请求参数不合法")
+		return
+	}
+
+	// 4. 调用 Service 处理业务
+	err = h.svc.VoteForRating(userID.(uint), uint(ratingID), model.VoteType(req.Vote))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.NotFound(c)
+		} else {
+			response.ServerError(c)
+		}
+		return
+	}
+
+	response.OkWithMessage(c, "投票成功", nil)
 }

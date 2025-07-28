@@ -10,6 +10,12 @@ type Config struct {
 	Logger    LogConfig       `mapstructure:"logger"`
 	Server    ServerConfig    `mapstructure:"server"`
 	Algorithm AlgorithmConfig `mapstructure:"algorithm"`
+	JWT       JWTConfig       `mapstructure:"jwt"`
+}
+
+type JWTConfig struct {
+	SecretKey  string `mapstructure:"secret_key"`
+	ExpiryTime string `mapstructure:"expiry_time"`
 }
 
 type ServerConfig struct {

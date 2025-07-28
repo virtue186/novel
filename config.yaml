@@ -25,3 +25,8 @@ logger:
 algorithm:
   imdb_m: 100.0 # 入榜最低影响力阈值 (使用浮点数)
   imdb_c: 7.5   # 全站基准分
+
+# JWT配置
+jwt:
+  secret_key: "your-very-secret-key" # 建议使用环境变量来存储这个密钥
+  expire_time: 72h
