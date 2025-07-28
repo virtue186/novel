@@ -24,12 +24,11 @@ func NewNovelHandler(svc service.NovelService) *NovelHandler {
 
 // GetNovels 获取小说列表 (已为排序和分页做好准备)
 func (h *NovelHandler) GetNovels(c *gin.Context) {
-	var query dto.PaginationQuery
+	var query dto.ListQuery
 	if err := c.ShouldBindQuery(&query); err != nil {
-		response.BadRequest(c, "分页或排序参数错误")
+		response.BadRequest(c, "查询参数错误")
 		return
 	}
-
 	paginatedResult, err := h.svc.GetRankedNovels(&query)
 	if err != nil {
 		response.ServerError(c)
@@ -136,4 +135,30 @@ func (h *NovelHandler) VoteForRating(c *gin.Context) {
 	}
 
 	response.OkWithMessage(c, "投票成功", nil)
+}
+
+func (h *NovelHandler) CreateNovel(c *gin.Context) {
+	// 1. 绑定并校验请求体到我们专用的 DTO
+	var req dto.CreateNovelRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		// 返回一个对用户友好的、通用的参数错误信息
+		response.BadRequest(c, "请求参数不合法或缺少必要字段")
+		return
+	}
+
+	// 2. 调用 Service 层，将创建的复杂业务逻辑委托出去
+	novel, err := h.svc.CreateNovel(&req)
+	if err != nil {
+		// 在这里，我们可以根据 Service 返回的不同错误类型，给出更具体的提示
+		// 但为了保持简洁，我们暂时统一返回服务器内部错误
+		response.ServerError(c)
+		return
+	}
+
+	// 3. 成功创建后，返回一个 201 Created 状态码和新创建的小说数据
+	c.JSON(201, response.Response{
+		Code: 0,
+		Msg:  "小说创建成功",
+		Data: novel,
+	})
 }

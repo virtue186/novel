@@ -13,10 +13,11 @@ import (
 
 // NovelService 定义了与小说相关的业务逻辑接口
 type NovelService interface {
-	GetRankedNovels(query *dto.PaginationQuery) (*dto.PaginatedResponse, error)
+	GetRankedNovels(query *dto.ListQuery) (*dto.PaginatedResponse, error)
 	GetNovelWithCalculatedScores(id uint) (*NovelScoreDetails, error)
 	CreateRatingForNovel(userID, novelID uint, score int, comment string) (*model.Rating, error)
 	VoteForRating(userID, ratingID uint, voteType model.VoteType) error
+	CreateNovel(req *dto.CreateNovelRequest) (*model.Novel, error)
 }
 
 // NovelScoreDetails 是一个新的 DTO，用于封装小说及其各种计算分数
@@ -28,22 +29,33 @@ type NovelScoreDetails struct {
 
 // novelService 结构体实现了 NovelService 接口
 type novelService struct {
-	repo     repository.NovelRepository
-	trustSvc TrustService
-	m        float64 // IMDb 公式参数 m
-	c        float64 // IMDb 公式参数 c
+	repo         repository.NovelRepository
+	trustSvc     TrustService
+	m            float64 // IMDb 公式参数 m
+	c            float64 // IMDb 公式参数 c
+	categoryRepo repository.CategoryRepository
+	tagRepo      repository.TagRepository
 }
 
 // NewNovelService 是 novelService 的构造函数，负责所有依赖的注入
-func NewNovelService(repo repository.NovelRepository, trustSvc TrustService, cfg *config.AlgorithmConfig) NovelService {
-	return &novelService{repo: repo, trustSvc: trustSvc, m: cfg.ImdbM, c: cfg.ImdbC}
+func NewNovelService(repo repository.NovelRepository, trustSvc TrustService, categoryRepo repository.CategoryRepository, tagRepo repository.TagRepository, cfg *config.AlgorithmConfig) NovelService {
+	return &novelService{
+		repo:         repo,
+		trustSvc:     trustSvc,
+		m:            cfg.ImdbM,
+		c:            cfg.ImdbC,
+		categoryRepo: categoryRepo,
+		tagRepo:      tagRepo,
+	}
+
 }
 
 // GetRankedNovels 实现了获取排序和分页后的小说列表的业务逻辑
-func (s *novelService) GetRankedNovels(query *dto.PaginationQuery) (*dto.PaginatedResponse, error) {
-	if query.PageSize > 100 { // 设置每页大小的上限，防止恶意请求
+func (s *novelService) GetRankedNovels(query *dto.ListQuery) (*dto.PaginatedResponse, error) {
+	if query.PageSize > 100 {
 		query.PageSize = 100
 	}
+	// 直接将 query 传递给 Repository
 	novels, total, err := s.repo.FindAll(query)
 	if err != nil {
 		return nil, err
@@ -223,4 +235,49 @@ func (s *novelService) calculateCommunityWeight(rating *model.Rating) float64 {
 		netUpvotes = 0
 	}
 	return 1 + 0.5*math.Log10(float64(netUpvotes)+1)
+}
+
+func (s *novelService) CreateNovel(req *dto.CreateNovelRequest) (*model.Novel, error) {
+	category, err := s.categoryRepo.FindOrCreate(req.CategoryName)
+	if err != nil {
+		return nil, errors.New("failed to process category")
+	}
+
+	tags, err := s.tagRepo.FindOrCreateByNames(req.TagNames)
+	if err != nil {
+		return nil, errors.New("failed to process tags")
+	}
+
+	// --- 核心修复点：安全地处理指针类型的 DTO 字段 ---
+	novel := &model.Novel{
+		Title:               req.Title,
+		Author:              req.Author,
+		Description:         req.Description,
+		CoverImageURL:       req.CoverImageURL,
+		PublicationType:     model.PublicationType(req.PublicationType),
+		SerializationStatus: model.SerializationStatus(req.SerializationStatus),
+		CategoryID:          category.ID,
+		Tags:                tags,
+	}
+
+	// 安全地解引用指针，如果指针不为 nil，则赋值
+	if req.WordCount != nil {
+		novel.WordCount = *req.WordCount
+	}
+	if req.Publisher != nil {
+		novel.Publisher = req.Publisher
+	}
+	if req.Isbn != nil {
+		novel.Isbn = req.Isbn
+	}
+	if req.PublicationSite != nil {
+		novel.PublicationSite = *req.PublicationSite
+	}
+	// --- 修复结束 ---
+
+	if err := s.repo.CreateInTx(novel); err != nil {
+		return nil, errors.New("failed to create novel in transaction")
+	}
+
+	return novel, nil
 }
